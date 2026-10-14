@@ -3,10 +3,12 @@
 Generate a derived surf-window calendar from a tide ICS/webcal feed.
 
 Rule:
-  surf event starts 2h after each HIGH/LOW tide event
-  surf event ends 2h before the following HIGH/LOW tide event
+  find crossings of a chosen predicted tide height (default 2.90 m)
+  create a 90-minute surf event centered on each crossing, both rising/falling
   surf events are clipped to the useful daily time range, default 07:00-22:00
-  surf events shorter than the minimum duration, default 60 minutes, are ignored
+  clipped events shorter than the minimum duration, default 60 minutes, are ignored
+
+  IMPORTANT: tide-only approximation. No swell, wind or safe-access prediction.
 
 Example:
   python surf_calendar_generator.py ^
@@ -19,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import math
 import re
 import sys
 from dataclasses import dataclass
@@ -53,6 +56,7 @@ class TideEvent:
     kind: str  # "high" or "low"
     uid: str
     raw_description: str = ""
+    height_m: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -61,6 +65,8 @@ class SurfWindow:
     end: datetime
     source: TideEvent
     next_tide: TideEvent
+    center: datetime
+    phase: str
     clipped: bool = False
 
 
@@ -144,6 +150,19 @@ def classify_tide(summary: str, description: str = "") -> Optional[str]:
     return None
 
 
+HEIGHT_RE = re.compile(r"(?<!\w)(-?\d+(?:[.,]\d+)?)\s*(m|metres?|meters?|ft|feet)\b", re.IGNORECASE)
+
+
+def extract_height_m(summary: str, description: str = "") -> Optional[float]:
+    """Extract the prediction, e.g. WebCalTides SUMMARY:High Tide 3.2 m."""
+    for source_text in (summary, description):
+        match = HEIGHT_RE.search(source_text)
+        if match:
+            value = float(match.group(1).replace(",", "."))
+            return value * 0.3048 if match.group(2).lower() in {"ft", "feet"} else value
+    return None
+
+
 def parse_tides(ics_bytes: bytes, default_tz_name: str) -> tuple[list[TideEvent], list[tuple[datetime, str]]]:
     default_tz = ZoneInfo(default_tz_name)
     cal = Calendar.from_ical(ics_bytes)
@@ -170,7 +189,12 @@ def parse_tides(ics_bytes: bytes, default_tz_name: str) -> tuple[list[TideEvent]
         uid = text_value(component, "UID").strip() or hashlib.sha1(
             f"{start.isoformat()}|{summary}|{description}".encode("utf-8")
         ).hexdigest()
-        tides.append(TideEvent(start=start, summary=summary, kind=kind, uid=uid, raw_description=description))
+        tides.append(
+            TideEvent(
+                start=start, summary=summary, kind=kind, uid=uid,
+                raw_description=description, height_m=extract_height_m(summary, description),
+            )
+        )
 
     tides.sort(key=lambda event: event.start)
     ignored.sort(key=lambda event: event[0])
@@ -220,42 +244,69 @@ def iter_daily_intersections(
 
 def build_surf_windows(
     tides: list[TideEvent],
-    start_offset_hours: float = 2.0,
-    end_offset_hours: float = 2.0,
+    target_height_m: float = 2.90,
+    window_duration_minutes: int = 90,
     min_duration_minutes: int = 60,
     day_start_hour: float = 7.0,
     day_end_hour: float = 22.0,
 ) -> list[SurfWindow]:
-    if not (0 <= day_start_hour < 24):
-        raise ValueError("day_start_hour must be between 0 and 24, excluded 24.")
-    if not (0 < day_end_hour <= 24):
-        raise ValueError("day_end_hour must be between 0 and 24, included 24.")
+    """Find when predicted height crosses the target, on both tide phases.
+
+    Assumes a cosine-shaped rise/fall between successive high and low tides:
+      h(u) = h0 + (h1 - h0) * (1 - cos(pi*u)) / 2, where 0 <= u <= 1.
+    Inverts that formula to estimate the target crossing time.
+    """
+    if not (0 <= day_start_hour < 24 and 0 < day_end_hour <= 24):
+        raise ValueError("Invalid daily start/end hours.")
     if day_end_hour <= day_start_hour:
         raise ValueError("day_end_hour must be greater than day_start_hour.")
+    if not math.isfinite(target_height_m):
+        raise ValueError("target_height_m must be finite.")
+    if window_duration_minutes <= 0 or min_duration_minutes <= 0:
+        raise ValueError("Window duration and minimum duration must be positive.")
 
+    half_window = timedelta(minutes=window_duration_minutes / 2)
+    minimum = timedelta(minutes=min_duration_minutes)
     windows: list[SurfWindow] = []
-    start_offset = timedelta(hours=start_offset_hours)
-    end_offset = timedelta(hours=end_offset_hours)
-    min_duration = timedelta(minutes=min_duration_minutes)
 
     for current_tide, next_tide in zip(tides, tides[1:]):
-        raw_start = current_tide.start + start_offset
-        raw_end = next_tide.start - end_offset
+        h0, h1 = current_tide.height_m, next_tide.height_m
+        if h0 is None or h1 is None or current_tide.kind == next_tide.kind or h0 == h1:
+            continue
+
+        fraction = (target_height_m - h0) / (h1 - h0)
+        # If the target is never crossed (or merely touched at an extremum),
+        # do not invent a surfing window.
+        if not 0.0 < fraction < 1.0:
+            continue
+
+        origin_utc = current_tide.start.astimezone(timezone.utc)
+        finish_utc = next_tide.start.astimezone(timezone.utc)
+        span_seconds = (finish_utc - origin_utc).total_seconds()
+        if span_seconds <= 0:
+            continue
+
+        share_of_half_cycle = math.acos(1 - 2 * fraction) / math.pi
+        center_utc = origin_utc + timedelta(seconds=span_seconds * share_of_half_cycle)
+        tz = current_tide.start.tzinfo
+        center = center_utc.astimezone(tz)
+        phase = "montante" if h1 > h0 else "descendante"
+
+        # Perform the duration arithmetic in UTC, including across DST changes.
+        raw_start = (center_utc - half_window).astimezone(tz)
+        raw_end = (center_utc + half_window).astimezone(tz)
 
         for start, end, was_clipped in iter_daily_intersections(
-            raw_start,
-            raw_end,
+            raw_start, raw_end,
             day_start_hour=day_start_hour,
             day_end_hour=day_end_hour,
         ):
-            if end - start >= min_duration:
+            if end.astimezone(timezone.utc) - start.astimezone(timezone.utc) >= minimum:
                 windows.append(
                     SurfWindow(
-                        start=start,
-                        end=end,
-                        source=current_tide,
-                        next_tide=next_tide,
-                        clipped=was_clipped,
+                        start=start, end=end, source=current_tide,
+                        next_tide=next_tide, center=center,
+                        phase=phase, clipped=was_clipped,
                     )
                 )
 
@@ -275,8 +326,7 @@ def make_uid(window: SurfWindow) -> str:
         [
             window.source.uid,
             window.next_tide.uid,
-            window.start.isoformat(),
-            window.end.isoformat(),
+            "height-crossing",
         ]
     )
     return hashlib.sha1(material.encode("utf-8")).hexdigest() + "@surf-calendar"
@@ -300,19 +350,22 @@ def generate_calendar(windows: Iterable[SurfWindow], calendar_name: str, timezon
         event.add("last-modified", now)
         event.add("dtstart", window.start)
         event.add("dtend", window.end)
-        event.add("summary", f"Surf — après {format_kind(window.source.kind)}")
-        event.add("location", "Biarritz")
+        event.add("summary", f"Surf — Côte des Basques — {window.phase}")
+        event.add("location", "Côte des Basques, Biarritz")
         description_lines = [
-            "Créneau généré automatiquement à partir du calendrier des marées.",
+            "Créneau indicatif calculé à partir de la hauteur de marée prédite.",
             "",
-            f"Marée source : {window.source.summary} — {window.source.start.strftime('%d/%m/%Y %H:%M %Z')}",
+            f"Hauteur visée : 2,90 m (valeur provisoire, référentiel du flux source).",
+            f"Passage estimé : {window.center.strftime('%d/%m/%Y %H:%M %Z')} ({window.phase}).",
+            f"Marée précédente : {window.source.summary} — {window.source.start.strftime('%d/%m/%Y %H:%M %Z')}",
             f"Marée suivante : {window.next_tide.summary} — {window.next_tide.start.strftime('%d/%m/%Y %H:%M %Z')}",
             "",
-            "Règle : début = marée source + 2h ; fin = marée suivante - 2h.",
-            "Limite horaire appliquée : créneau conservé uniquement entre 07:00 et 22:00.",
+            "Calcul : interpolation sinusoïdale entre deux marées, fenêtre de 90 minutes centrée sur le passage.",
+            "Filtre horaire : 07:00–22:00 ; créneaux tronqués de moins de 60 min exclus.",
+            "ATTENTION : ni la houle, ni le vent, ni la sécurité d'accès aux rochers ne sont évalués.",
         ]
         if window.clipped:
-            description_lines.append("Ce créneau a été tronqué pour respecter la limite 07:00-22:00.")
+            description_lines.append("Fenêtre tronquée par les limites horaires.")
         event.add("description", "\n".join(description_lines))
         cal.add_component(event)
 
@@ -322,7 +375,7 @@ def generate_calendar(windows: Iterable[SurfWindow], calendar_name: str, timezon
 def print_preview(tides: list[TideEvent], ignored: list[tuple[datetime, str]], windows: list[SurfWindow], n: int) -> None:
     print("\nPremières marées utiles détectées :")
     for tide in tides[:n]:
-        print(f"- {tide.start:%Y-%m-%d %H:%M %Z} | {format_kind(tide.kind)} | {tide.summary}")
+        print(f"- {tide.start:%Y-%m-%d %H:%M %Z} | {format_kind(tide.kind)} | {tide.summary} | hauteur {tide.height_m}")
 
     if ignored:
         print(f"\nInfo : {len(ignored)} événement(s) non-marée ignoré(s), par exemple :")
@@ -336,7 +389,8 @@ def print_preview(tides: list[TideEvent], ignored: list[tuple[datetime, str]], w
         clipped_marker = " | tronqué 07:00-22:00" if window.clipped else ""
         print(
             f"- {window.start:%Y-%m-%d %H:%M %Z} → {window.end:%H:%M %Z} "
-            f"({total_minutes // 60}h{total_minutes % 60:02d}) | après {format_kind(window.source.kind)}{clipped_marker}"
+            f"({total_minutes // 60}h{total_minutes % 60:02d}) | "
+            f"{window.phase}, passage {window.center:%H:%M}{clipped_marker}"
         )
 
 
@@ -346,8 +400,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--output", default="surf-calendar.ics", help="Output .ics file path.")
     parser.add_argument("--timezone", default="Europe/Paris", help="Timezone used for naive source dates.")
     parser.add_argument("--calendar-name", default="Surf — fenêtres marées", help="Calendar display name.")
-    parser.add_argument("--start-offset-hours", type=float, default=2.0, help="Hours after each tide for event start.")
-    parser.add_argument("--end-offset-hours", type=float, default=2.0, help="Hours before following tide for event end.")
+    parser.add_argument("--target-height-m", type=float, default=2.90, help="Target tide height, meters in upstream feed's datum.")
+    parser.add_argument("--window-duration-minutes", type=int, default=90, help="Duration centered on target height crossing.")
     parser.add_argument("--min-duration-minutes", type=int, default=60, help="Ignore derived windows shorter than this duration, default 60 minutes.")
     parser.add_argument("--day-start-hour", type=float, default=7.0, help="Earliest allowed daily event start hour, default 7.0.")
     parser.add_argument("--day-end-hour", type=float, default=22.0, help="Latest allowed daily event end hour, default 22.0.")
@@ -360,10 +414,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         if len(tides) < 2:
             raise RuntimeError(f"Only {len(tides)} high/low tide event(s) found. Need at least 2.")
 
+        missing_heights = sum(tide.height_m is None for tide in tides)
+        if missing_heights:
+            raise RuntimeError(
+                f"{missing_heights}/{len(tides)} marées sans hauteur exploitable : "
+                "calendrier non publié pour éviter des créneaux incomplets."
+            )
+
         windows = build_surf_windows(
             tides,
-            start_offset_hours=args.start_offset_hours,
-            end_offset_hours=args.end_offset_hours,
+            target_height_m=args.target_height_m,
+            window_duration_minutes=args.window_duration_minutes,
             min_duration_minutes=args.min_duration_minutes,
             day_start_hour=args.day_start_hour,
             day_end_hour=args.day_end_hour,
@@ -375,7 +436,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(
             f"\nOK — {len(tides)} marées haute/basse lues, {len(ignored)} événements ignorés, "
             f"{len(windows)} créneaux surf générés entre {args.day_start_hour:g}h et {args.day_end_hour:g}h "
-            f"avec durée minimale {args.min_duration_minutes} min."
+            f"autour de {args.target_height_m:.2f} m, fenêtre {args.window_duration_minutes} min, "
+            f"durée minimale après troncature {args.min_duration_minutes} min."
         )
         print(f"Fichier créé : {output_path}")
         print_preview(tides, ignored, windows, args.preview)
