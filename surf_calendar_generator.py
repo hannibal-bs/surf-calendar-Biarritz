@@ -332,7 +332,10 @@ def make_uid(window: SurfWindow) -> str:
     return hashlib.sha1(material.encode("utf-8")).hexdigest() + "@surf-calendar"
 
 
-def generate_calendar(windows: Iterable[SurfWindow], calendar_name: str, timezone_name: str) -> Calendar:
+def generate_calendar(
+    windows: Iterable[SurfWindow], calendar_name: str, timezone_name: str,
+    target_height_m: float = 2.90, window_duration_minutes: int = 90,
+) -> Calendar:
     cal = Calendar()
     cal.add("prodid", "-//Surf Calendar Generator//Biarritz Tide Windows//FR")
     cal.add("version", "2.0")
@@ -355,12 +358,12 @@ def generate_calendar(windows: Iterable[SurfWindow], calendar_name: str, timezon
         description_lines = [
             "Créneau indicatif calculé à partir de la hauteur de marée prédite.",
             "",
-            f"Hauteur visée : 2,90 m (valeur provisoire, référentiel du flux source).",
+            f"Hauteur visée : {target_height_m:.2f} m (référentiel du flux source).",
             f"Passage estimé : {window.center.strftime('%d/%m/%Y %H:%M %Z')} ({window.phase}).",
             f"Marée précédente : {window.source.summary} — {window.source.start.strftime('%d/%m/%Y %H:%M %Z')}",
             f"Marée suivante : {window.next_tide.summary} — {window.next_tide.start.strftime('%d/%m/%Y %H:%M %Z')}",
             "",
-            "Calcul : interpolation sinusoïdale entre deux marées, fenêtre de 90 minutes centrée sur le passage.",
+            f"Calcul : interpolation sinusoïdale entre deux marées, fenêtre de {window_duration_minutes} minutes centrée sur le passage.",
             "Filtre horaire : 07:00–22:00 ; créneaux tronqués de moins de 60 min exclus.",
             "ATTENTION : ni la houle, ni le vent, ni la sécurité d'accès aux rochers ne sont évalués.",
         ]
@@ -429,7 +432,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             day_start_hour=args.day_start_hour,
             day_end_hour=args.day_end_hour,
         )
-        cal = generate_calendar(windows, args.calendar_name, args.timezone)
+        if not windows:
+            raise RuntimeError("Aucun passage à la hauteur visée : calendrier non publié.")
+        cal = generate_calendar(
+            windows, args.calendar_name, args.timezone,
+            target_height_m=args.target_height_m,
+            window_duration_minutes=args.window_duration_minutes,
+        )
         output_path = Path(args.output).expanduser().resolve()
         output_path.write_bytes(cal.to_ical())
 
