@@ -5,6 +5,8 @@ Generate a derived surf-window calendar from a tide ICS/webcal feed.
 Rule:
   find crossings of a chosen predicted tide height (default 2.90 m)
   create a 90-minute surf event centered on each crossing, both rising/falling
+  when high tide does not reach the target, create one fallback 90-minute
+  surf event centered on high tide (not two events)
   surf events are clipped to the useful daily time range, default 07:00-22:00
   clipped events shorter than the minimum duration, default 60 minutes, are ignored
 
@@ -68,6 +70,7 @@ class SurfWindow:
     center: datetime
     phase: str
     clipped: bool = False
+    fallback: bool = False
 
 
 def normalize_source_url(source: str) -> str:
@@ -250,7 +253,7 @@ def build_surf_windows(
     day_start_hour: float = 7.0,
     day_end_hour: float = 22.0,
 ) -> list[SurfWindow]:
-    """Find when predicted height crosses the target, on both tide phases.
+    """Find height crossings; fall back to high-water time below the target.
 
     Assumes a cosine-shaped rise/fall between successive high and low tides:
       h(u) = h0 + (h1 - h0) * (1 - cos(pi*u)) / 2, where 0 <= u <= 1.
@@ -310,6 +313,33 @@ def build_surf_windows(
                     )
                 )
 
+    # One fallback window per low high tide, not one on each side of it.
+    # At exactly target height, the high tide itself is the target crossing.
+    for high_tide in tides:
+        if (high_tide.kind != "high" or high_tide.height_m is None
+                or high_tide.height_m > target_height_m):
+            continue
+
+        center = high_tide.start
+        center_utc = center.astimezone(timezone.utc)
+        tz = center.tzinfo
+        raw_start = (center_utc - half_window).astimezone(tz)
+        raw_end = (center_utc + half_window).astimezone(tz)
+        for start, end, was_clipped in iter_daily_intersections(
+            raw_start, raw_end,
+            day_start_hour=day_start_hour,
+            day_end_hour=day_end_hour,
+        ):
+            if end.astimezone(timezone.utc) - start.astimezone(timezone.utc) >= minimum:
+                windows.append(
+                    SurfWindow(
+                        start=start, end=end, source=high_tide, next_tide=high_tide,
+                        center=center, phase="pleine mer", clipped=was_clipped,
+                        fallback=True,
+                    )
+                )
+
+    windows.sort(key=lambda window: window.start.astimezone(timezone.utc))
     return windows
 
 
@@ -326,7 +356,7 @@ def make_uid(window: SurfWindow) -> str:
         [
             window.source.uid,
             window.next_tide.uid,
-            "height-crossing",
+            "peak-fallback" if window.fallback else "height-crossing",
         ]
     )
     return hashlib.sha1(material.encode("utf-8")).hexdigest() + "@surf-calendar"
@@ -353,20 +383,37 @@ def generate_calendar(
         event.add("last-modified", now)
         event.add("dtstart", window.start)
         event.add("dtend", window.end)
-        event.add("summary", f"Surf — Côte des Basques — {window.phase}")
+        event.add(
+            "summary",
+            "Surf — Côte des Basques — repli (pleine mer)" if window.fallback
+            else f"Surf — Côte des Basques — {window.phase}",
+        )
         event.add("location", "Côte des Basques, Biarritz")
-        description_lines = [
-            "Créneau indicatif calculé à partir de la hauteur de marée prédite.",
-            "",
-            f"Hauteur visée : {target_height_m:.2f} m (référentiel du flux source).",
-            f"Passage estimé : {window.center.strftime('%d/%m/%Y %H:%M %Z')} ({window.phase}).",
-            f"Marée précédente : {window.source.summary} — {window.source.start.strftime('%d/%m/%Y %H:%M %Z')}",
-            f"Marée suivante : {window.next_tide.summary} — {window.next_tide.start.strftime('%d/%m/%Y %H:%M %Z')}",
-            "",
-            f"Calcul : interpolation sinusoïdale entre deux marées, fenêtre de {window_duration_minutes} minutes centrée sur le passage.",
+        if window.fallback:
+            description_lines = [
+                "Créneau de repli : la pleine mer reste sous la hauteur cible.",
+                "",
+                f"Hauteur cible provisoire : {target_height_m:.2f} m.",
+                f"Pleine mer prévue : {window.source.height_m:.2f} m à "
+                f"{window.center.strftime('%d/%m/%Y %H:%M %Z')}.",
+                f"Fenêtre de {window_duration_minutes} minutes centrée sur la pleine mer.",
+                "Ce créneau est une hypothèse à confirmer sur le spot, pas une garantie de bonnes vagues.",
+            ]
+        else:
+            description_lines = [
+                "Créneau indicatif calculé à partir de la hauteur de marée prédite.",
+                "",
+                f"Hauteur visée : {target_height_m:.2f} m (référentiel du flux source).",
+                f"Passage estimé : {window.center.strftime('%d/%m/%Y %H:%M %Z')} ({window.phase}).",
+                f"Marée précédente : {window.source.summary} — {window.source.start.strftime('%d/%m/%Y %H:%M %Z')}",
+                f"Marée suivante : {window.next_tide.summary} — {window.next_tide.start.strftime('%d/%m/%Y %H:%M %Z')}",
+                "",
+                f"Calcul : interpolation sinusoïdale entre deux marées, fenêtre de {window_duration_minutes} minutes centrée sur le passage.",
+            ]
+        description_lines.extend([
             "Filtre horaire : 07:00–22:00 ; créneaux tronqués de moins de 60 min exclus.",
             "ATTENTION : ni la houle, ni le vent, ni la sécurité d'accès aux rochers ne sont évalués.",
-        ]
+        ])
         if window.clipped:
             description_lines.append("Fenêtre tronquée par les limites horaires.")
         event.add("description", "\n".join(description_lines))
@@ -393,7 +440,8 @@ def print_preview(tides: list[TideEvent], ignored: list[tuple[datetime, str]], w
         print(
             f"- {window.start:%Y-%m-%d %H:%M %Z} → {window.end:%H:%M %Z} "
             f"({total_minutes // 60}h{total_minutes % 60:02d}) | "
-            f"{window.phase}, passage {window.center:%H:%M}{clipped_marker}"
+            f"{'repli pleine mer' if window.fallback else window.phase}, "
+            f"passage {window.center:%H:%M}{clipped_marker}"
         )
 
 
@@ -433,7 +481,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             day_end_hour=args.day_end_hour,
         )
         if not windows:
-            raise RuntimeError("Aucun passage à la hauteur visée : calendrier non publié.")
+            raise RuntimeError("Aucun créneau exploitable (passage cible ou pleine mer de repli).")
         cal = generate_calendar(
             windows, args.calendar_name, args.timezone,
             target_height_m=args.target_height_m,
