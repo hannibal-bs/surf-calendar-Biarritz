@@ -9,7 +9,9 @@ Ce projet génère automatiquement un calendrier ICS de **créneaux de surf indi
 - Générer un créneau de **90 minutes centré sur le passage** (45 minutes avant et 45 minutes après).
 - Conserver **marée montante et marée descendante**.
 - Calculer le passage par interpolation cosinus entre les hauteurs extrêmes et leurs horaires (approximation, **pas une courbe de marée exacte**).
-- Si la hauteur cible n'est pas atteinte, ne pas créer de créneau pour cet intervalle.
+- **Lorsque la pleine mer est inférieure ou égale à 2,90 m**, créer **un seul créneau de repli** de 90 minutes centré sur la pleine mer (pas de doublon montante/descendante). Ce créneau est marqué « repli (pleine mer) » dans Outlook.
+- Lorsque la pleine mer est supérieure à 2,90 m, conserver les créneaux normaux centrés sur les passages à 2,90 m.
+- Si un intervalle de marée ne traverse pas la hauteur cible, ne pas inventer de passage : seul un éventuel repli autour d'une pleine mer basse est proposé.
 - Garder les créneaux seulement entre **07:00 et 22:00** ; ceux qui débordent sont tronqués.
 - Supprimer un créneau tronqué s'il dure moins de **60 minutes**.
 - Ignorer les événements `Sunrise` et `Sunset` dans la source.
@@ -41,5 +43,11 @@ python surf_calendar_generator.py \
   --min-duration-minutes 60 \
   --preview 12
 ```
+
+## Exemple de créneau de repli
+
+Si une pleine mer atteint 2,65 m à 14:00, l'événement devient « Surf — Côte des Basques — repli (pleine mer) », de 13:15 à 14:45.
+
+Un créneau de repli n'est **pas une promesse de bonnes vagues** ni une preuve de sécurité. Il n'existe pour l'instant aucun seuil de hauteur minimale de qualité ni de limite maximale d'accès sécurisée.
 
 La hauteur cible et la durée sont configurables par les paramètres de commande sans changement d'infrastructure.
