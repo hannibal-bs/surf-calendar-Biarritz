@@ -1,62 +1,45 @@
-# Calendrier Surf — Biarritz
+# Calendrier Surf — Côte des Basques, Biarritz
 
-Ce projet génère automatiquement un calendrier ICS de créneaux surf à partir du calendrier WebCalTides de Biarritz.
+Ce projet génère automatiquement un calendrier ICS de **créneaux de surf indicatifs** à partir des prédictions de marées WebCalTides de Biarritz.
 
 ## Règles appliquées
 
-- début du créneau = marée courante + 2h
-- fin du créneau = marée suivante - 2h
-- créneaux conservés uniquement entre 07:00 et 22:00
-- durée minimale : 60 minutes
-- les créneaux qui débordent sont tronqués ; ceux qui restent hors plage ou trop courts sont supprimés
-- les événements `Sunrise` et `Sunset` du calendrier WebCalTides sont ignorés
+- **Hauteur cible provisoire : 2,90 m**, dans le référentiel propre à la source WebCalTides (à valider par observation sur le spot).
+- Pour chaque intervalle entre marée haute et marée basse, trouver le passage théorique à cette hauteur.
+- Générer un créneau de **90 minutes centré sur le passage** (45 minutes avant et 45 minutes après).
+- Conserver **marée montante et marée descendante**.
+- Calculer le passage par interpolation cosinus entre les hauteurs extrêmes et leurs horaires (approximation, **pas une courbe de marée exacte**).
+- Si la hauteur cible n'est pas atteinte, ne pas créer de créneau pour cet intervalle.
+- Garder les créneaux seulement entre **07:00 et 22:00** ; ceux qui débordent sont tronqués.
+- Supprimer un créneau tronqué s'il dure moins de **60 minutes**.
+- Ignorer les événements `Sunrise` et `Sunset` dans la source.
+- Ne pas publier de nouveau calendrier si les hauteurs sont absentes/inexploitables.
 
-Le calendrier source est :
+**Important :** les heures sont des estimations purement liées à la marée. Ni la qualité réelle des vagues, ni la houle, ni la sécurité d'accès/sortie auprès des rochers ne sont évaluées. Le niveau de 2,90 m reste à calibrer **dans le référentiel de WebCalTides** ; ne pas supposer que toutes les sources utilisent le même zéro vertical.
 
-```text
-webcal://webcaltides.org/tides/T232e6c9.ics?units=metric
-```
+## Infrastructure (inchangée)
 
-## Fichiers
-
-```text
-surf_calendar_generator.py
-requirements.txt
-.github/workflows/publish-surf-calendar.yml
-```
-
-## Déploiement GitHub Pages
-
-1. Créer un repository GitHub, par exemple `surf-calendar-biarritz`.
-2. Uploader tous les fichiers de ce dossier dans le repository, en conservant le dossier `.github/workflows`.
-3. Aller dans `Settings` → `Pages`.
-4. Sous `Build and deployment`, choisir `Source: GitHub Actions`.
-5. Aller dans `Actions` → `Publish surf calendar` → `Run workflow`.
-6. Une fois le workflow terminé, le calendrier sera disponible à une URL du type :
-
-```text
-https://VOTRE-NOM-UTILISATEUR.github.io/surf-calendar-biarritz/surf-biarritz.ics
-```
-
-## Abonnement Outlook
-
-Dans Outlook Web :
-
-1. Calendrier
-2. Ajouter un calendrier
-3. S’abonner à partir du web
-4. Coller l’URL publique du fichier `surf-biarritz.ics`
-5. Nommer le calendrier, par exemple `Surf — Biarritz`
-
-## Mise à jour automatique
-
-Le workflow GitHub Actions tourne tous les jours à 05:17 UTC et republie le fichier ICS.
-
-Attention : Outlook peut mettre plusieurs heures, parfois plus de 24h, à rafraîchir un abonnement ICS.
+- Source : `webcal://webcaltides.org/tides/T232e6c9.ics?units=metric`
+- Générateur : `surf_calendar_generator.py`
+- Publication : `.github/workflows/publish-surf-calendar.yml`
+- Fichier public : `surf-biarritz.ics` via GitHub Pages.
+- Publication automatique : tous les jours à **05:17 UTC**.
+- Consommation : abonnement au fichier ICS dans Outlook. La synchronisation Outlook peut prendre plusieurs heures.
 
 ## Test local
 
 ```bash
 python -m pip install -r requirements.txt
-python surf_calendar_generator.py --source "webcal://webcaltides.org/tides/T232e6c9.ics?units=metric" --output surf-biarritz.ics --timezone Europe/Paris --day-start-hour 7 --day-end-hour 22 --min-duration-minutes 60 --preview 12
+python surf_calendar_generator.py \
+  --source "webcal://webcaltides.org/tides/T232e6c9.ics?units=metric" \
+  --output surf-biarritz.ics \
+  --timezone Europe/Paris \
+  --target-height-m 2.90 \
+  --window-duration-minutes 90 \
+  --day-start-hour 7 \
+  --day-end-hour 22 \
+  --min-duration-minutes 60 \
+  --preview 12
 ```
+
+La hauteur cible et la durée sont configurables par les paramètres de commande sans changement d'infrastructure.
