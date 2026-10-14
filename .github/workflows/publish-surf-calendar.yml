@@ -38,8 +38,6 @@ jobs:
             --output "public/surf-biarritz.ics" \
             --timezone "Europe/Paris" \
             --calendar-name "Surf — Biarritz" \
-            --target-height-m 2.90 \
-            --window-duration-minutes 90 \
             --day-start-hour 7 \
             --day-end-hour 22 \
             --min-duration-minutes 60 \
@@ -59,11 +57,10 @@ jobs:
             <h1>Calendrier surf — Biarritz</h1>
             <p>Calendrier généré automatiquement à partir des horaires de marées.</p>
             <ul>
-              <li>Créneau de 90 minutes autour du passage à 2,90 m (hauteur provisoire)</li>
-              <li>Marée montante et descendante</li>
+              <li>Début : marée courante + 2h</li>
+              <li>Fin : marée suivante - 2h</li>
               <li>Créneaux limités à 07:00-22:00</li>
-              <li>Durée minimale après troncature : 60 minutes</li>
-              <li>Prévisions indicatives : la sécurité d'accès n'est pas évaluée</li>
+              <li>Durée minimale : 60 minutes</li>
             </ul>
             <p><a href="surf-biarritz.ics">Télécharger / s’abonner au fichier ICS</a></p>
           </body>
