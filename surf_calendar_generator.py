@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate variable-duration surf windows within 1.75–2.40 m WebCalTides.
+"""Generate variable-duration surf windows within 1.65–2.40 m WebCalTides.
 Intervals are cosine-interpolated between consecutive high/low predictions,
 merged, then clipped to 07:00–22:00 and filtered for at least 60 minutes.
 The 2.10 m optimum is indicative, not an additional filter.
@@ -231,7 +231,7 @@ def iter_daily_intersections(
 
 def build_surf_windows(
     tides: list[TideEvent],
-    lower_height_m: float = 1.75,
+    lower_height_m: float = 1.65,
     upper_height_m: float = 2.40,
     min_duration_minutes: int = 60,
     day_start_hour: float = 7.0,
@@ -335,7 +335,7 @@ def make_uid(window: SurfWindow) -> str:
 
 def generate_calendar(
     windows: Iterable[SurfWindow], calendar_name: str, timezone_name: str,
-    lower_height_m: float = 1.75, upper_height_m: float = 2.40,
+    lower_height_m: float = 1.65, upper_height_m: float = 2.40,
     optimal_height_m: float = 2.10,
     min_duration_minutes: int = 60,
     day_start_hour: float = 7.0, day_end_hour: float = 22.0,
@@ -400,7 +400,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--output", default="surf-calendar.ics", help="Output .ics file path.")
     parser.add_argument("--timezone", default="Europe/Paris", help="Timezone used for naive source dates.")
     parser.add_argument("--calendar-name", default="Surf — fenêtres marées", help="Calendar display name.")
-    parser.add_argument("--lower-height-m", type=float, default=1.75, help="Lower bound in source tide height datum (m).")
+    parser.add_argument("--lower-height-m", type=float, default=1.65, help="Lower bound in source tide height datum (m).")
     parser.add_argument("--upper-height-m", type=float, default=2.40, help="Upper bound in source tide height datum (m).")
     parser.add_argument("--optimal-height-m", type=float, default=2.10, help="Indicative optimal height for event descriptions only (m).")
     parser.add_argument("--min-duration-minutes", type=int, default=60, help="Ignore derived windows shorter than this duration.")
